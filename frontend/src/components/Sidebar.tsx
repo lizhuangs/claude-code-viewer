@@ -57,13 +57,18 @@ export const Sidebar: React.FC<SidebarProps> = ({
                     ) : (
                         projects.map((project) => {
                             const isSelected = selectedProject === project.name;
-                            const projectDisplayName = project.name.split('/').pop();
+                            // 从 path 中提取最终文件夹名称，支持 Unix 和 Windows 路径
+                            const projectDisplayName = project.path
+                                ? project.path.split(/[/\\]/).filter(Boolean).pop()
+                                : project.name;
+                            const fullPath = project.path || project.name;
 
                             return (
                                 <div key={project.name} className="group/project">
                                     {/* Project Item */}
                                     <div
                                         onClick={() => onProjectSelect(project.name)}
+                                        title={fullPath}
                                         className={`
                                             relative p-3 border-2 border-black cursor-pointer transition-all duration-200 ease-out mb-2
                                             ${isSelected

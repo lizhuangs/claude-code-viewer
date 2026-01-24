@@ -98,6 +98,14 @@ class Storage:
             content,
             content_rowid UNINDEXED
         )''')
+
+        # Add indexes for performance (critical for large databases)
+        c.execute('''CREATE INDEX IF NOT EXISTS idx_messages_session_id
+                     ON messages(session_id)''')
+        c.execute('''CREATE INDEX IF NOT EXISTS idx_sessions_project_name
+                     ON sessions(project_name)''')
+        c.execute('''CREATE INDEX IF NOT EXISTS idx_sessions_start_time
+                     ON sessions(start_time)''')
         
         # Tags table
         c.execute('''CREATE TABLE IF NOT EXISTS tags (
@@ -166,9 +174,10 @@ class Storage:
                     metadata.get('avg_prompt_len', 0.0)
                 ))
 
-                # Insert Messages
-                c.execute("DELETE FROM messages WHERE session_id = ?", (session_data['session_id'],))
-                c.execute("DELETE FROM messages_fts WHERE content_rowid IN (SELECT id FROM messages WHERE session_id = ?)", (session_data['session_id'],))
+                # Delete old messages and FTS entries (FTS first, before messages are deleted)
+                session_id = session_data['session_id']
+                c.execute("DELETE FROM messages_fts WHERE content_rowid IN (SELECT id FROM messages WHERE session_id = ?)", (session_id,))
+                c.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
 
                 for msg in messages:
                     c.execute("INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
@@ -243,17 +252,22 @@ class Storage:
                         metadata.get('avg_prompt_len', 0.0)
                     ))
 
-                    # Delete old messages
-                    c.execute("DELETE FROM messages WHERE session_id = ?", (session_data['session_id'],))
+                    # Delete old messages and FTS entries
+                    session_id = session_data['session_id']
+                    c.execute("DELETE FROM messages_fts WHERE content_rowid IN (SELECT id FROM messages WHERE session_id = ?)", (session_id,))
+                    c.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
 
-                    # Insert Messages
-                    for msg in messages:
-                        c.execute("INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
-                                  (session_data['session_id'], msg['role'], msg.get('content', ''), msg['timestamp']))
-                        row_id = c.lastrowid
-                        c.execute("INSERT INTO messages_fts (content_rowid, content) VALUES (?, ?)", (row_id, msg.get('content', '')))
+                    # Batch insert messages
+                    if messages:
+                        msg_data = [(session_id, msg['role'], msg.get('content', ''), msg['timestamp']) for msg in messages]
+                        c.executemany("INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)", msg_data)
 
-                    if progress_callback and (i + 1) % 50 == 0:
+                        # Get inserted row IDs for FTS (use last_insert_rowid trick)
+                        c.execute("SELECT id, content FROM messages WHERE session_id = ?", (session_id,))
+                        fts_data = [(row[0], row[1]) for row in c.fetchall()]
+                        c.executemany("INSERT INTO messages_fts (content_rowid, content) VALUES (?, ?)", fts_data)
+
+                    if progress_callback and (i + 1) % 10 == 0:
                         progress_callback(i + 1)
 
                 conn.commit()

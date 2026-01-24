@@ -149,7 +149,11 @@ export const ProjectDetails: React.FC<ProjectDetailsProps> = ({ projectName }) =
                     <div className="absolute top-0 right-0 p-4 opacity-10">
                         <Folder size={120} strokeWidth={1} />
                     </div>
-                    <h1 className="text-4xl font-black mb-2 uppercase tracking-tight">{details.name}</h1>
+                    <Tooltip content={details.name}>
+                        <h1 className="text-4xl font-black mb-2 uppercase tracking-tight cursor-default">
+                            {details.name.split(/[/\\]/).filter(Boolean).pop() || details.name}
+                        </h1>
+                    </Tooltip>
                     <div className="flex items-center text-gray-600 font-mono text-sm bg-gray-100 p-2 border-2 border-black inline-block">
                         <Folder size={16} className="mr-2" />
                         {details.path || t('project.path_unavailable')}

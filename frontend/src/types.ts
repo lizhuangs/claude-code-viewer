@@ -1,5 +1,6 @@
 export interface Project {
     name: string;
+    path: string | null;
     last_updated: string | null;
     session_count: number;
     total_tokens?: number;

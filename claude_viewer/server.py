@@ -233,7 +233,7 @@ def get_scan_progress():
     return scan_progress.to_dict()
 
 
-@app.post("/api/scan/rescan")
+@app.api_route("/api/scan/rescan", methods=["GET", "POST"])
 def trigger_rescan():
     """Trigger a manual rescan of all sessions."""
     global scan_progress

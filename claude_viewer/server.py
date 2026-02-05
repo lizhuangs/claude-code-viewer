@@ -198,22 +198,49 @@ async def startup_event():
 
     # Start watcher for live updates
     def on_log_change(file_path):
+        """Handle log file changes without full directory scan."""
         try:
-            for session_info in parser.scan_projects():
-                if os.path.abspath(session_info['file_path']) == os.path.abspath(file_path):
-                    result = parser.parse_session(file_path)
-                    if result['messages']:
-                        storage.save_session(
-                            session_info['project'],
-                            session_info,
-                            result['messages'],
-                            result['metadata'],
-                            project_path=session_info.get('project_path')
-                        )
-                    logger.info(f"Updated session from {file_path}")
-                    break
+            # Extract session info directly from file path
+            # Path format: ~/.claude/projects/{project_dir}/{session_id}.jsonl
+            file_path_obj = Path(file_path)
+            session_id = file_path_obj.stem
+            project_dir = file_path_obj.parent
+
+            # Decode project name from directory name
+            raw_project_name = project_dir.name
+            decoded = raw_project_name.replace('-', '/')
+
+            project_path = decoded
+            if decoded.startswith('/Users') or decoded.startswith('/home'):
+                # Try to reconstruct actual path
+                reconstructed = parser._reconstruct_path(decoded)
+                if reconstructed:
+                    project_path = str(reconstructed)
+                    project_name = reconstructed.name
+                else:
+                    project_name = Path(decoded).name
+            else:
+                project_name = raw_project_name
+
+            session_info = {
+                "project": project_name,
+                "project_path": project_path,
+                "file_path": str(file_path),
+                "session_id": session_id
+            }
+
+            result = parser.parse_session(file_path)
+            if result['messages']:
+                storage.save_session(
+                    session_info['project'],
+                    session_info,
+                    result['messages'],
+                    result['metadata'],
+                    project_path=session_info.get('project_path')
+                )
+                logger.debug(f"Updated session {session_id}")
         except Exception as e:
-            logger.error(f"Error processing update: {e}")
+            logger.error(f"Error processing update for {file_path}: {e}")
 
     watcher = LogWatcher(CLAUDE_LOG_PATH, on_log_change)
     watcher.start()

@@ -12,6 +12,8 @@ class Storage:
     def __init__(self, db_path: Path):
         self.db_path = db_path
         self._lock = threading.Lock()  # Thread lock for write operations
+        self._write_count = 0  # Track writes for auto-optimization
+        self._OPTIMIZE_THRESHOLD = 1000  # Run optimize after N writes
         self.init_db()
 
     def init_db(self):
@@ -22,6 +24,8 @@ class Storage:
         # Enable WAL mode for better concurrent performance
         c.execute("PRAGMA journal_mode=WAL")
         c.execute("PRAGMA synchronous=NORMAL")
+        # Limit WAL file size to prevent unbounded growth
+        c.execute("PRAGMA wal_autocheckpoint=1000")
         
         # Projects table
         c.execute('''CREATE TABLE IF NOT EXISTS projects (
@@ -93,10 +97,12 @@ class Storage:
             FOREIGN KEY(session_id) REFERENCES sessions(id)
         )''')
         
-        # FTS table for full-text search on content
+        # FTS table for full-text search on content (contentless to save space)
+        # Uses content from messages table directly, no duplicate storage
         c.execute('''CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
             content,
-            content_rowid UNINDEXED
+            content='messages',
+            content_rowid='id'
         )''')
 
         # Add indexes for performance (critical for large databases)
@@ -176,18 +182,24 @@ class Storage:
 
                 # Delete old messages and FTS entries (FTS first, before messages are deleted)
                 session_id = session_data['session_id']
-                c.execute("DELETE FROM messages_fts WHERE content_rowid IN (SELECT id FROM messages WHERE session_id = ?)", (session_id,))
+                # For contentless FTS, delete using rowid from messages table
+                c.execute("DELETE FROM messages_fts WHERE rowid IN (SELECT id FROM messages WHERE session_id = ?)", (session_id,))
                 c.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
 
                 for msg in messages:
                     c.execute("INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
                               (session_data['session_id'], msg['role'], msg.get('content', ''), msg['timestamp']))
 
-                    # Index for search
+                    # Index for search (contentless FTS uses rowid, content is read from messages table)
                     row_id = c.lastrowid
-                    c.execute("INSERT INTO messages_fts (content_rowid, content) VALUES (?, ?)", (row_id, msg.get('content', '')))
+                    c.execute("INSERT INTO messages_fts (rowid, content) VALUES (?, ?)", (row_id, msg.get('content', '')))
 
                 conn.commit()
+
+                # Track writes and trigger optimization if needed
+                self._write_count += 1
+                if self._write_count >= self._OPTIMIZE_THRESHOLD:
+                    self._maybe_optimize(conn)
             finally:
                 conn.close()
 
@@ -254,7 +266,8 @@ class Storage:
 
                     # Delete old messages and FTS entries
                     session_id = session_data['session_id']
-                    c.execute("DELETE FROM messages_fts WHERE content_rowid IN (SELECT id FROM messages WHERE session_id = ?)", (session_id,))
+                    # For contentless FTS, delete using rowid
+                    c.execute("DELETE FROM messages_fts WHERE rowid IN (SELECT id FROM messages WHERE session_id = ?)", (session_id,))
                     c.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
 
                     # Batch insert messages
@@ -262,10 +275,10 @@ class Storage:
                         msg_data = [(session_id, msg['role'], msg.get('content', ''), msg['timestamp']) for msg in messages]
                         c.executemany("INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)", msg_data)
 
-                        # Get inserted row IDs for FTS (use last_insert_rowid trick)
+                        # Get inserted row IDs for FTS (contentless FTS uses rowid)
                         c.execute("SELECT id, content FROM messages WHERE session_id = ?", (session_id,))
                         fts_data = [(row[0], row[1]) for row in c.fetchall()]
-                        c.executemany("INSERT INTO messages_fts (content_rowid, content) VALUES (?, ?)", fts_data)
+                        c.executemany("INSERT INTO messages_fts (rowid, content) VALUES (?, ?)", fts_data)
 
                     if progress_callback and (i + 1) % 10 == 0:
                         progress_callback(i + 1)
@@ -392,10 +405,11 @@ class Storage:
         conn.row_factory = sqlite3.Row
         c = conn.cursor()
         # Join with sessions and projects to give context
+        # For contentless FTS, use rowid to join with messages.id
         sql = '''
             SELECT m.*, s.project_name, s.id as session_id
             FROM messages m
-            JOIN messages_fts fts ON m.id = fts.content_rowid
+            JOIN messages_fts fts ON m.id = fts.rowid
             JOIN sessions s ON m.session_id = s.id
             WHERE fts.content MATCH ?
             ORDER BY m.timestamp DESC
@@ -437,8 +451,30 @@ class Storage:
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
         c.execute('''
-            DELETE FROM session_tags 
+            DELETE FROM session_tags
             WHERE session_id = ? AND tag_id IN (SELECT id FROM tags WHERE name = ?)
         ''', (session_id, tag_name))
         conn.commit()
         conn.close()
+
+    def _maybe_optimize(self, conn=None):
+        """Run database optimization if threshold reached."""
+        try:
+            self._write_count = 0
+            should_close = False
+            if conn is None:
+                conn = sqlite3.connect(self.db_path, timeout=30.0)
+                should_close = True
+
+            c = conn.cursor()
+            # Checkpoint WAL to main database
+            c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            # Optimize FTS index
+            c.execute("INSERT INTO messages_fts(messages_fts) VALUES('optimize')")
+            conn.commit()
+            logger.info("Database optimization completed")
+
+            if should_close:
+                conn.close()
+        except Exception as e:
+            logger.warning(f"Database optimization failed: {e}")
